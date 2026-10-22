@@ -1,0 +1,79 @@
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useAuth } from '../context/AuthContext'
+import { deletePath, eligibleRooms, publishPath, updatePath, type PathDetail, type PathRoom, type PathWrite } from '../api/paths'
+import { useUnsavedChanges } from '../hooks/useUnsavedChanges'
+import { actionError } from '../lib/presentation'
+import { categoryLabel } from '../lib/categories'
+import WorkspaceShell from './WorkspaceShell'
+import PathFields from './PathFields'
+import CategorySelect from './CategorySelect'
+import SafeMarkdown from './SafeMarkdown'
+import { useConfirm } from './ConfirmProvider'
+
+const steps = ['Details', 'Add rooms', 'Organize', 'Preview & publish']
+const metadata = (path: PathDetail): PathWrite => ({ title: path.title, description: path.description, category: path.category, difficulty: path.difficulty, objectives: path.objectives })
+export function reorderRooms(rooms: PathRoom[], id: number, target: number): PathRoom[] {
+  const from = rooms.findIndex(room => room.id === id)
+  if (from < 0 || target < 0 || target >= rooms.length) return rooms
+  const next = [...rooms], [room] = next.splice(from, 1); next.splice(target, 0, room); return next
+}
+function RoomSummary({ room }: { room: PathRoom }) {
+  return <div className="path-room-summary"><strong>{room.name}</strong><div className="room-card-meta"><span className="meta-pill">{room.room_type === 'THEORY' ? 'Theory' : 'Practical'}</span><span className={`diff-tag diff-${room.difficulty}`}>{room.difficulty}</span><span>{categoryLabel(room.category)}</span><span>{room.points_total == null ? 'Points unavailable' : `${room.points_total} points`}</span></div>{room.publication_status === 'draft' && <p className="form-hint">Draft · publish this room before publishing the path.</p>}</div>
+}
+export default function PathCreator({ path }: { path: PathDetail }) {
+  const { user } = useAuth(), client = useQueryClient(), navigate = useNavigate(), confirm = useConfirm()
+  const [saved, setSaved] = useState(path), [data, setData] = useState(metadata(path)), [rooms, setRooms] = useState(path.rooms)
+  const [step, setStep] = useState(path.status === 'published' ? 3 : 0), [search, setSearch] = useState(''), [q, setQ] = useState(''), [category, setCategory] = useState(''), [difficulty, setDifficulty] = useState(''), [page, setPage] = useState(1)
+  const [pending, setPending] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [removeUnavailable, setRemoveUnavailable] = useState(false)
+  const busy = useRef(false), drag = useRef<number | null>(null), heading = useRef<HTMLHeadingElement>(null)
+  const editable = saved.status === 'draft', dirty = JSON.stringify(data) !== JSON.stringify(metadata(saved)) || rooms.map(r => r.id).join(',') !== saved.rooms.map(r => r.id).join(',') || Boolean(saved.unavailable_count && removeUnavailable)
+  useUnsavedChanges(dirty)
+  useEffect(() => { const timer = setTimeout(() => { setQ(search.trim()); setPage(1) }, 250); return () => clearTimeout(timer) }, [search])
+  const options = useQuery({ queryKey: ['path-room-options', user?.id, q, category, difficulty, page], queryFn: () => eligibleRooms(q, page, category, difficulty), enabled: editable && step === 1, retry: false, refetchOnWindowFocus: false })
+  const selectStep = (index: number) => { setStep(index); setTimeout(() => heading.current?.focus(), 0) }
+  const accept = (next: PathDetail) => {
+    setSaved(next); setData(metadata(next)); setRooms(next.rooms); setRemoveUnavailable(false)
+    client.setQueryData(['path', path.id, true, user?.id], next)
+    void client.invalidateQueries({ queryKey: ['paths'] }); void client.invalidateQueries({ queryKey: ['path-progress', path.id] })
+    void client.invalidateQueries({ queryKey: ['path', path.id, false] })
+  }
+  const act = async (action: () => Promise<PathDetail | void>, message: string) => {
+    if (busy.current) return
+    busy.current = true; setPending(true); setError(''); setNotice('')
+    try { const next = await action(); if (next) accept(next); setNotice(message) }
+    catch (err) { setError(actionError(err, 'save this learning path') + ' Your unsaved changes are still here.') }
+    finally { busy.current = false; setPending(false) }
+  }
+  const save = () => {
+    if (!data.title.trim() || !data.category) { setError('Enter a title and select a category in Details.'); selectStep(0); return }
+    if (saved.unavailable_count && !removeUnavailable) { setError('Review the unavailable room references before saving.'); return }
+    void act(() => updatePath(path.id, { ...data, room_ids: rooms.map(room => room.id) }), 'Draft saved. Your room order is stored; preview it before publishing.')
+  }
+  const draftRooms = rooms.filter(room => room.publication_status === 'draft')
+  const ready = rooms.length > 0 && !draftRooms.length && !saved.unavailable_count && !dirty && Boolean(data.title.trim() && data.category)
+  const total = rooms.reduce((sum, room) => sum + (room.points_total ?? 0), 0), pointsKnown = rooms.every(room => room.points_total != null)
+  return <WorkspaceShell className="path-editor path-creator"><Link className="auth-return" to="/paths/mine">← My learning paths</Link>
+    <header className="page-toolbar"><div><p className="eyebrow">Build a learning journey</p><h1 className="page-heading">{saved.title}</h1><p className="muted">Choose rooms. Arrange a recommended order. Preview and publish.</p></div><span className={`badge badge-${saved.status}`}>{saved.status === 'published' ? 'Published' : 'Draft'}</span></header>
+    <nav className="path-wizard-steps" aria-label="Path creation steps">{steps.map((label, index) => <button key={label} type="button" disabled={pending} className={step === index ? 'is-active' : ''} aria-current={step === index ? 'step' : undefined} onClick={() => selectStep(index)}><span aria-hidden="true">{index + 1}</span>{label}</button>)}</nav>
+    {error && <p role="alert" className="error">{error}</p>}{notice && <p role="status" className="success">{notice}</p>}
+    {!editable && <section className="panel path-status-note"><h2>This path is live</h2><p>To edit its details or room sequence, unpublish this path first. Its rooms and learner progress are preserved. You can publish it again after saving.</p><button type="button" className="btn btn-secondary" disabled={pending} onClick={async () => { if (await confirm({ title: 'Unpublish path to edit?', message: 'The path will leave public discovery until you publish it again. Rooms, answers and learner progress remain unchanged.', label: 'Unpublish path' })) void act(() => publishPath(path.id, true), 'Path is now a draft. You can edit it safely.') }}>Unpublish to edit</button><Link to={`/paths/${path.id}`} className="btn btn-ghost">View live path</Link></section>}
+    {!!saved.unavailable_count && <section className="warning" role="status"><p>{saved.unavailable_count} referenced rooms are unavailable and cannot be shown. Their private information stays hidden.</p>{editable && <label className="checkbox-label"><input type="checkbox" checked={removeUnavailable} disabled={pending} onChange={e => setRemoveUnavailable(e.target.checked)} /> Remove unavailable references when I save this sequence</label>}</section>}
+    <section className="panel path-wizard-content"><header className="section-toolbar"><h2 tabIndex={-1} ref={heading}>Step {step + 1}: {steps[step]}</h2><span className="muted">{rooms.length}/50 rooms</span></header>
+      {step === 0 && <><p className="form-hint">These details introduce your journey to learners. The description is shown in full on the path page and shortened on discovery cards.</p><PathFields data={data} onChange={setData} disabled={pending || !editable} /></>}
+      {step === 1 && <><p className="form-hint">Search your own rooms and other creators’ published rooms. Private rooms owned by someone else are never listed. Select up to 50 rooms.</p>
+        <div className="path-room-filters"><label>Search rooms<input type="search" maxLength={100} value={search} disabled={!editable} onChange={e => setSearch(e.target.value)} placeholder="Search titles, descriptions or subjects…" /></label><label>Category<CategorySelect filter value={category} onChange={value => { setCategory(value); setPage(1) }} disabled={!editable} /></label><label>Difficulty<select value={difficulty} disabled={!editable} onChange={e => { setDifficulty(e.target.value); setPage(1) }}><option value="">All levels</option><option value="easy">Beginner</option><option value="medium">Intermediate</option><option value="hard">Advanced</option></select></label></div>
+        {!editable ? <p className="learning-empty">Unpublish this path to change its room selection.</p> : options.isPending ? <p role="status">Finding eligible rooms…</p> : options.isError ? <p className="error" role="alert">Rooms could not be loaded. <button type="button" onClick={() => void options.refetch()}>Retry</button></p> : <><ul className="path-room-results">{options.data?.items.map(room => { const added = rooms.some(r => r.id === room.id); return <li key={room.id}><RoomSummary room={room} /><button type="button" className="btn btn-secondary btn-sm" aria-label={`${added ? 'Added' : 'Add to path'}: ${room.name}`} disabled={pending || added || rooms.length >= 50 || options.isFetching} onClick={() => setRooms(current => current.some(r => r.id === room.id) || current.length >= 50 ? current : [...current, room])}>{added ? 'Added ✓' : 'Add to path'}</button></li> })}</ul>{!options.data?.items.length && <p className="learning-empty">No eligible rooms match. Try another search, clear filters, or create a room in My Rooms first.</p>}<nav className="public-pagination" aria-label="Eligible room pages"><button type="button" className="btn btn-ghost" disabled={page === 1 || options.isFetching} onClick={() => setPage(p => p - 1)}>Previous rooms</button><span>Page {page}</span><button type="button" className="btn btn-ghost" disabled={!options.data?.has_more || page >= 1000 || options.isFetching} onClick={() => setPage(p => p + 1)}>More rooms</button></nav></>}
+        {(search || category || difficulty) && <button type="button" className="text-action" onClick={() => { setSearch(''); setQ(''); setCategory(''); setDifficulty(''); setPage(1) }}>Clear room filters</button>}
+      </>}
+      {step === 2 && <><p className="form-hint">Learners follow this recommended sequence, with no mandatory locks. Drag rooms to reorder, or use the accessible move buttons.</p>{!rooms.length && <div className="empty-state"><h3>Your sequence is empty</h3><p>Add existing rooms to start shaping this journey.</p><button type="button" className="btn btn-secondary" onClick={() => selectStep(1)}>Find rooms to add</button></div>}
+        <ol className="path-editor-rooms path-ordered-rooms">{rooms.map((room, index) => <li key={room.id} draggable={editable && !pending} onDragStart={e => { drag.current = room.id; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', String(room.id)) }} onDragEnd={() => { drag.current = null }} onDragOver={e => { if (editable && !pending && drag.current !== null) e.preventDefault() }} onDrop={e => { e.preventDefault(); const source = drag.current; if (editable && !pending && source !== null) setRooms(current => reorderRooms(current, source, index)); drag.current = null }}><span className="journey-step" aria-label={`Room ${index + 1}`}>{index + 1}</span><RoomSummary room={room} /><div className="button-row"><button type="button" className="btn btn-ghost btn-sm" aria-label={`Move ${room.name} up`} disabled={pending || !editable || index === 0} onClick={() => setRooms(current => reorderRooms(current, room.id, index - 1))}>↑</button><button type="button" className="btn btn-ghost btn-sm" aria-label={`Move ${room.name} down`} disabled={pending || !editable || index === rooms.length - 1} onClick={() => setRooms(current => reorderRooms(current, room.id, index + 1))}>↓</button><button type="button" className="btn btn-ghost btn-sm" aria-label={`Remove ${room.name} from path`} disabled={pending || !editable} onClick={() => { setRooms(current => current.filter(r => r.id !== room.id)); setNotice(`${room.name} removed from this draft sequence. The room and learner progress are preserved.`) }}>Remove</button></div></li>)}</ol></>}
+      {step === 3 && <><div className="path-learner-preview"><p className="eyebrow">{saved.status === 'published' ? 'Published path preview' : 'Learner-facing preview · not yet published'}</p><h2>{data.title || 'Your learning path'}</h2><div className="room-card-meta"><span className="meta-pill">{categoryLabel(data.category)}</span><span>{data.difficulty}</span><span>{rooms.length} rooms</span><span>{total} {pointsKnown ? 'available' : 'known'} points</span></div><p className="education-copy">{data.description}</p>{data.objectives && <SafeMarkdown text={data.objectives} />}<ol className="path-preview-list">{rooms.map(room => <li key={room.id}><RoomSummary room={room} /></li>)}</ol>{!rooms.length && <p className="learning-empty">Add at least one published room before publishing.</p>}</div>
+        {editable && <div className="path-readiness"><h3>Publish checklist</h3><ul><li>{data.title.trim() && data.category ? '✓' : '○'} Title and category selected</li><li>{rooms.length ? '✓' : '○'} At least one room added</li><li>{!draftRooms.length && rooms.length ? '✓' : '○'} All included rooms are published{draftRooms.length ? ` (${draftRooms.length} still drafts)` : ''}</li><li>{!dirty && !saved.unavailable_count ? '✓' : '○'} Changes saved and unavailable references reviewed</li></ul><p className="form-hint">Publishing makes these details and eligible room briefings public. Answers and protected lessons stay behind their existing access checks. Rooms unpublished or deleted later are hidden, and path progress uses the rooms still available.</p><button type="button" className="btn btn-primary" disabled={pending || !ready} onClick={async () => { if (await confirm({ title: 'Publish learning path?', message: 'Your path details and published room briefings will appear in discovery. Existing room ownership, answers and learner progress are unchanged.', label: 'Publish path' })) void act(() => publishPath(path.id), 'Your learning path is published.') }}>{pending ? 'Publishing…' : 'Publish path'}</button></div>}
+      </>}
+    </section>
+    <footer className="path-save-bar"><span role="status">{dirty ? 'Unsaved changes' : 'All changes saved'} · {rooms.length} rooms</span><div className="button-row">{step > 0 && <button type="button" className="btn btn-secondary" disabled={pending} onClick={() => selectStep(step - 1)}>Back</button>}{editable && <button type="button" className="btn btn-secondary" disabled={pending || !dirty || Boolean(saved.unavailable_count && !removeUnavailable)} onClick={save}>{pending ? 'Saving…' : 'Save draft'}</button>}{step < 3 && <button type="button" className="btn btn-primary" disabled={pending} onClick={() => selectStep(step + 1)}>{step === 0 ? 'Next: Add rooms' : step === 1 ? 'Next: Organize' : 'Next: Preview'}</button>}</div></footer>
+    {editable && <details className="path-delete-section"><summary>Remove this draft path</summary><p>Only the path is removed. Its rooms and learner progress remain.</p><button type="button" className="btn btn-danger btn-sm" disabled={pending || dirty} onClick={async () => { if (await confirm({ title: 'Delete draft path?', message: 'Rooms, answers and learner progress will be preserved.', label: 'Delete path', danger: true })) void act(async () => { await deletePath(path.id); navigate('/paths/mine') }, 'Path removed.') }}>Delete draft path</button></details>}
+  </WorkspaceShell>
+}

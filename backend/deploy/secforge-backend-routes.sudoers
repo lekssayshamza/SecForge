@@ -1,0 +1,6 @@
+# SecForge backend host route management.
+# Grants the application account the narrow root wrapper only: it may add or
+# delete validated builder /32 host routes on the backend management tunnel.
+# No generic `ip` or shell access is granted; the wrapper itself strictly
+# validates every invocation. Installed with 0440 root:root.
+hamza ALL=(root) NOPASSWD: /usr/local/libexec/secforge/backend_routes

@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+"""Opt-in CLI OpenVPN launcher for a backend development host."""
+import os
+from pathlib import Path
+import shlex
+import stat
+import sys
+
+HOOK = '/usr/local/libexec/secforge/learner_routes'
+SAFE_DIRECTIVES = {
+    'client', 'dev', 'proto', 'remote', 'resolv-retry', 'nobind', 'persist-key',
+    'persist-tun', 'remote-cert-tls', 'data-ciphers', 'auth', 'tls-version-min', 'verb',
+}
+
+
+def validate_profile(text):
+    block = None
+    seen = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(('#', ';')):
+            continue
+        if block:
+            if stripped == f'</{block}>':
+                block = None
+            continue
+        if stripped in ('<ca>', '<cert>', '<key>', '<tls-crypt>'):
+            block = stripped[1:-1]
+            if block in seen:
+                raise ValueError('Duplicate inline material')
+            seen.add(block)
+            continue
+        tokens = shlex.split(stripped)
+        if not tokens or tokens[0] not in SAFE_DIRECTIVES:
+            raise ValueError('Use an unmodified downloaded SecForge profile')
+        if tokens[0] == 'dev' and tokens != ['dev', 'tun']:
+            raise ValueError('Profile must use an automatically assigned tun device')
+    if block or seen != {'ca', 'cert', 'key', 'tls-crypt'}:
+        raise ValueError('Incomplete inline profile')
+
+
+def main():
+    try:
+        if os.geteuid() != 0 or len(sys.argv) != 2:
+            raise ValueError('Usage: sudo learner_vpn /path/to/secforge.ovpn')
+        s = os.stat(HOOK, follow_symlinks=False)
+        if s.st_uid != 0 or s.st_mode & 0o022 or not stat.S_ISREG(s.st_mode):
+            raise ValueError('Install the root-owned routing hook first')
+        path = Path(sys.argv[1]).resolve(strict=True)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as f:
+            s = os.fstat(f.fileno())
+            if not stat.S_ISREG(s.st_mode) or s.st_uid != int(os.environ.get('SUDO_UID', '0')) or s.st_mode & 0o077:
+                raise ValueError('Profile must belong to you and have permissions 600')
+            content = f.read()
+        validate_profile(content)
+        # Immutable private snapshot: no validation/use race on a user-owned
+        # file and no second private-key file left on disk after disconnect.
+        snapshot = os.memfd_create('secforge-learner-profile', flags=0)
+        os.set_inheritable(snapshot, True)
+        os.fchmod(snapshot, 0o600)
+        with os.fdopen(os.dup(snapshot), 'w') as f:
+            f.write(content)
+        os.lseek(snapshot, 0, os.SEEK_SET)
+        # OpenVPN receives its own dev/source/gateway on every reconnect.
+        os.execv('/usr/sbin/openvpn', ['/usr/sbin/openvpn', '--config', f'/proc/self/fd/{snapshot}',
+            '--script-security', '2', '--route-noexec', '--route-up', HOOK,
+            '--disable-dco',
+            '--route-pre-down', HOOK, '--up-restart', '--auth-nocache',
+            '--connect-retry-max', '3', '--connect-timeout', '10', '--resolv-retry', '15'])
+    except (OSError, ValueError):
+        print('Cannot start SecForge learner VPN. Check profile permissions and development setup.', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

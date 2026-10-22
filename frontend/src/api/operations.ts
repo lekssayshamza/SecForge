@@ -1,0 +1,14 @@
+import api from './axios'
+export interface Page<T> { items:T[]; total:number; page:number; page_size:number }
+export interface RoomMetric { id:number;title:string;room_type:string;status:string;learners_started:number;total_starts:number;lab_requests:number;completions:number;completion_rate:number|null;solves:number;points:number;views:null }
+export interface PathMetric {id:number;title:string;status:string;eligible_rooms:number;learners_started:number;learners_completed:number;completion_rate:number|null}
+export interface Analytics {owned_rooms:number;published_rooms:number;draft_rooms:number;theory_rooms:number;practical_rooms:number;unique_learners:number;room_starts:number;total_starts:number;lab_requests:number;completions:number;completion_rate:number|null;solves:number;points:number;published_paths:number;views:null;paths:PathMetric[];paths_truncated:boolean;trend:{day:string;solves:number;points:number}[]}
+export interface RoomAnalytics {room:RoomMetric;questions:{id:number;text:string;active:boolean;solve_count:number;points_awarded:number}[]}
+export interface Account {id:number;username:string;display_name:string|null;role:'learner'|'creator'|'admin';suspended:boolean;created_at:string;points:number;completed_rooms:number}
+export interface Content {id:number;title:string;creator_id:number;creator:string;room_type?:string;category:string;difficulty:string;status:string;moderation_hold:boolean;created_at:string;updated_at:string}
+export interface LabRecord {id:number;kind:string;owner_id:number;owner:string;room_id:number;room:string;status:string;started_at:string;expires_at:string;remaining_seconds:number;cleanup_status:string;issue:string|null}
+export interface AuditRecord {id:number;actor_id:number|null;target_type:string;target_id:number;action:string;outcome:string;context:Record<string,string|number|boolean>;created_at:string}
+export interface AdminOverview {accounts:number;learners:number;creators:number;administrators:number;suspended:number;published_rooms:number;draft_rooms:number;theory_rooms:number;practical_rooms:number;published_paths:number;active_labs:number;active_builders:number;failed_labs:number;expired_labs:number;recent_issues:LabRecord[]}
+export interface Inventory {available:boolean;observed_at:string;instances:{id:string;role:string;instance_type:string;state:string}[];running_count:number|null;truncated:boolean;hourly_estimate:number|null;monthly_baseline_estimate:number|null;pricing_note:string;issue:string|null}
+export async function operationRead<T>(url:string,params:Record<string,string|number>={},signal?:AbortSignal):Promise<T> {return (await api.get(url,{params,signal})).data}
+export async function operationWrite(url:string,data:Record<string,unknown>,method:'patch'|'post') {return (await api[method](url,data)).data as {changed:boolean}}

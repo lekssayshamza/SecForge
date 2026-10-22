@@ -1,0 +1,10 @@
+# PLACEHOLDERS ONLY. This is not a plan and must not be applied as-is.
+# Per-room builders/labs are managed by SecForge, not by manual module applies.
+vpc_id              = "<APPROVED_VPC_ID>"
+subnet_id           = "<APPROVED_APPLICATION_SUBNET_ID>"
+challenge_subnet    = "<APPROVED_CHALLENGE_SUBNET_ID>"
+gateway_group       = "<APPROVED_VPN_SECURITY_GROUP_ID>"
+key_name            = "<APPROVED_EC2_KEY_PAIR_NAME>"
+state_bucket        = "<APPROVED_PRIVATE_STATE_BUCKET>"
+admin_cidr          = "<APPROVED_ADMIN_IPV4>/32"
+protected_resources = ["<PROTECTED_RESOURCE_ARN>"]

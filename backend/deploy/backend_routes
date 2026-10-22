@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Narrow root wrapper for SecForge backend builder host routes.
+
+Granted to the SecForge application account via a NOPASSWD sudoers rule;
+every invocation is revalidated here so no generic ``ip`` or shell access
+is ever conferred. The only permitted operations are adding or deleting a
+single validated IPv4 builder address as a ``/32`` host route through the
+backend management tunnel (``tun1``) to the VPN server address. Deleting an
+already-absent route is tolerated (idempotent cleanup).
+"""
+
+import ipaddress
+import re
+import subprocess
+import sys
+
+BACKEND_ROUTE_GATEWAY = "10.8.0.1"
+BACKEND_ROUTE_DEV = "tun1"
+BACKEND_ROUTE_METRIC = "100"
+_IPV4_RE = re.compile(r"^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$")
+
+
+class WrapperError(Exception):
+    """Invalid or unsupported wrapper invocation."""
+
+
+def validate_args(argv: list[str]) -> tuple[str, str]:
+    """Validate wrapper arguments; return ``(action, address)``."""
+    if len(argv) != 3:
+        raise WrapperError("usage: backend_routes add|del <ipv4>")
+    action = argv[1]
+    if action not in ("add", "del"):
+        raise WrapperError(f"unsupported action: {argv[1]}")
+    raw = argv[2]
+    if not _IPV4_RE.fullmatch(raw):
+        raise WrapperError(f"invalid address: {argv[2]}")
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        raise WrapperError(f"invalid address: {argv[2]}") from None
+    if address.version != 4:
+        raise WrapperError(f"invalid address: {argv[2]}")
+    return action, str(address)
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = argv if argv is not None else sys.argv
+    try:
+        action, address = validate_args(argv)
+    except WrapperError as exc:
+        print(f"backend_routes: {exc}", file=sys.stderr)
+        return 2
+    prefix = f"{address}/32"
+    if action == "add":
+        command = [
+            "ip",
+            "route",
+            "replace",
+            prefix,
+            "via",
+            BACKEND_ROUTE_GATEWAY,
+            "dev",
+            BACKEND_ROUTE_DEV,
+            "metric",
+            BACKEND_ROUTE_METRIC,
+        ]
+    else:
+        command = [
+            "ip",
+            "route",
+            "del",
+            prefix,
+            "via",
+            BACKEND_ROUTE_GATEWAY,
+            "dev",
+            BACKEND_ROUTE_DEV,
+        ]
+    proc = subprocess.run(command, capture_output=True, text=True)
+    if proc.returncode != 0:
+        error = proc.stderr.strip()
+        if action == "del" and "No such process" in error:
+            return 0
+        print(f"backend_routes: {error}", file=sys.stderr)
+        return proc.returncode
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,8 @@
+import type { PathWrite } from '../api/paths'
+import CategorySelect from './CategorySelect'
+export default function PathFields({ data, onChange, disabled = false }: { data: PathWrite; onChange: (value: PathWrite) => void; disabled?: boolean }) {
+  return <fieldset className="modal-fields" disabled={disabled}><div className="form-group"><label htmlFor="path-title">Path title</label><input id="path-title" maxLength={120} required value={data.title} onChange={e => onChange({ ...data, title: e.target.value })} /></div>
+    <div className="form-group"><label htmlFor="path-description">Public description</label><textarea id="path-description" maxLength={2000} rows={3} value={data.description} onChange={e => onChange({ ...data, description: e.target.value })} /></div>
+    <div className="form-row"><div className="form-group"><label htmlFor="path-category">Category</label><CategorySelect id="path-category" value={data.category} onChange={category => onChange({ ...data, category })} /></div><div className="form-group"><label htmlFor="path-difficulty">Level</label><select id="path-difficulty" value={data.difficulty} onChange={e => onChange({ ...data, difficulty: e.target.value })}><option value="easy">Beginner</option><option value="medium">Intermediate</option><option value="hard">Advanced</option></select></div></div>
+    <div className="form-group"><label htmlFor="path-objectives">Public learning objectives</label><textarea id="path-objectives" maxLength={2000} rows={3} value={data.objectives} onChange={e => onChange({ ...data, objectives: e.target.value })} /><p className="form-hint">The description and objectives become public. Never include answers or private connection details.</p></div></fieldset>
+}

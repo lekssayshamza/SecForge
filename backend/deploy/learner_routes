@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+"""OpenVPN hook for dual-VPN development hosts; never granted NOPASSWD."""
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+CONFIG = Path('/etc/secforge/learner-routing.json')
+IP = '/usr/sbin/ip'
+
+
+class RouteError(Exception):
+    pass
+
+
+def network(value):
+    try:
+        n = ipaddress.IPv4Network(value, strict=True)
+        if any(n.subnet_of(ipaddress.IPv4Network(r)) for r in
+               ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')):
+            return n
+    except (ValueError, TypeError):
+        pass
+    raise RouteError('Invalid private network configuration')
+
+
+def load_config():
+    # O_NOFOLLOW plus fstat closes the symlink/replacement race on the file.
+    fd = os.open(CONFIG, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as f:
+        s = os.fstat(f.fileno())
+        if s.st_uid != 0 or s.st_mode & 0o022 or not stat.S_ISREG(s.st_mode):
+            raise RouteError('Routing configuration must be root owned and protected')
+        data = json.load(f)
+    cidr, vpn = network(data['challenge_cidr']), network(data['vpn_cidr'])
+    management = ipaddress.IPv4Address(data['management_vpn_ip'])
+    if cidr.overlaps(vpn) or management not in vpn or data['metric'] != 50:
+        raise RouteError('Ambiguous routing configuration')
+    return str(cidr), vpn, management, 50
+
+
+def ip(*args):
+    p = subprocess.run([IP, *args], capture_output=True, text=True, timeout=10)
+    if p.returncode:
+        # No host addresses, process output or profile material in errors.
+        raise RouteError('Routing command failed; inspect local route state')
+    return p.stdout
+
+
+def sync(env):
+    cidr, vpn, management, metric = load_config()
+    action = env.get('script_type')
+    if action not in ('route-up', 'route-pre-down'):
+        raise RouteError('Unsupported OpenVPN hook event')
+    dev = env.get('dev', '')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,15}', dev):
+        raise RouteError('Invalid tunnel device')
+    try:
+        source = ipaddress.IPv4Address(env['ifconfig_local']) if env.get('ifconfig_local') else None
+        gateway = ipaddress.IPv4Address(env['route_vpn_gateway']) if env.get('route_vpn_gateway') else None
+    except ValueError:
+        raise RouteError('Missing or invalid VPN connection addresses') from None
+    if action == 'route-up' and (source is None or gateway is None):
+        raise RouteError('Missing or invalid VPN connection addresses')
+    if ((source is not None and (source not in vpn or source == management
+            or source in (vpn.network_address, vpn.broadcast_address)))
+            or (gateway is not None and gateway not in vpn)
+            or (source is not None and source == gateway)):
+        raise RouteError('Connection is not an eligible user VPN identity')
+    devices = json.loads(ip('-j', '-d', 'address', 'show', 'dev', dev))
+    if len(devices) != 1 or devices[0].get('linkinfo', {}).get('info_kind') not in ('tun', 'ovpn'):
+        raise RouteError('VPN device does not own the assigned source address')
+    local = [ipaddress.IPv4Address(a['local']) for a in devices[0].get('addr_info', [])
+             if a.get('family', 'inet') == 'inet' and ipaddress.IPv4Address(a['local']) in vpn]
+    if source is None and action == 'route-pre-down' and len(local) == 1:
+        source = local[0]
+    if source not in local or source == management:
+        raise RouteError('VPN device does not own the assigned source address')
+    routes = json.loads(ip('-j', 'route', 'show', 'exact', cidr))
+    candidates = [r for r in routes if r.get('metric', 0) == metric]
+    if gateway is None and action == 'route-pre-down':
+        # OpenVPN can clear route_vpn_gateway on restart. Only recover it from
+        # our existing exact device/source route; never infer the host gateway.
+        matches = [r for r in candidates if r.get('dev') == dev and r.get('prefsrc') == str(source)]
+        if not matches:
+            return
+        if len(matches) != 1:
+            raise RouteError('Ambiguous existing user route')
+        gateway = ipaddress.IPv4Address(matches[0]['gateway'])
+        if gateway not in vpn or source == gateway:
+            raise RouteError('Existing user route has an invalid gateway')
+    owned = [r for r in candidates if r.get('dev') == dev
+             and r.get('gateway') == str(gateway) and r.get('prefsrc') == str(source)]
+    if action == 'route-up':
+        if any(r.get('metric', 0) < metric for r in routes):
+            raise RouteError('A competing subnet route has higher priority; review development routing')
+        if candidates and (len(candidates) != 1 or len(owned) != 1):
+            raise RouteError('Another user route already exists; use an isolated client')
+        if owned:
+            return
+        operation = 'add'
+    else:
+        if not owned:
+            return  # Never delete another identity's route.
+        operation = 'del'
+    ip('route', operation, cidr, 'via', str(gateway), 'dev', dev,
+       'src', str(source), 'metric', str(metric))
+
+
+def main():
+    try:
+        if os.geteuid() != 0:
+            raise RouteError('Run through the privileged OpenVPN development launcher')
+        sync(os.environ)
+        return 0
+    except (RouteError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
+        reason = str(exc) if isinstance(exc, RouteError) else 'Check protected local configuration'
+        print(f'SecForge learner routing failed closed: {reason}.', file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
